@@ -1,37 +1,118 @@
+# hsac — Hierarchical Discrete Soft Actor-Critic for offline RL
 
+A small, installable library for **offline reinforcement learning with a two-level
+hierarchical controller**, built for sequential decision problems with a structured
+discrete action space — the motivating case being **optimal treatment identification**
+(choosing combinations of treatments over time from logged patient trajectories).
 
-This program starts by reading the AHS data obtained during the data preparation phase. The main functionality is implemented in the `main_preprocessing` and `utils` Python files. The following steps are performed:
+This is a clean, tested re-implementation of the hierarchical RL method from the
+original research code, packaged like `d3rlpy`: `pip install`, a
+`Config.create().fit(...)` API, and a runnable example that learns end to end with
+no private data.
 
-1. **Categorical Columns Transformation**:  
-   - Categorical columns, particularly those related to healthcare utilization (e.g., ER visits), are converted into dummy variables to facilitate analysis.
+## The method
 
-2. **Merging Duplicate Rows**:  
-   - Rows with the same values for the same date were identified as duplicates. These rows were merged to ensure only unique entries for each date.
+```
+            ┌─────────────── manager (high level) ───────────────┐
+   state ──▶│  picks an OPTION (a region of the action space)     │
+            └───────────────────────┬─────────────────────────────┘
+                                    │  option
+            ┌───────────────────────▼─────────────────────────────┐
+   state ──▶│  worker (low level): picks the ACTION within the     │
+            │  chosen option's group                               │
+            └──────────────────────────────────────────────────────┘
+```
 
-3. **Processing the `sex` Column**:  
-   - The `sex` column was filtered to keep only the records for males, and boolean values (True/False) were replaced with numeric values (1/0).
+- **Two-level hierarchy.** A *manager* selects a coarse option; a *worker* selects
+  the concrete action within that option's group. The manager's option-value is
+  distilled from the worker's best achievable value (a hierarchical value
+  decomposition), so the two levels stay consistent.
+- **Offline + conservative (CQL).** Both levels learn from a fixed dataset with a
+  Conservative Q-Learning penalty, so out-of-distribution actions are not
+  over-valued — essential when you can only learn from logged data.
+- **Ensemble uncertainty.** Each critic is an ensemble; the spread across members is
+  an epistemic-uncertainty signal exposed at prediction time ("uncertainty-guided").
+- **Attention encoder (optional).** A self-attention state encoder over features is
+  available (and exposes its attention map for interpretability); an MLP encoder is
+  the robust default.
 
-4. **Handling Missing Visit Records**:  
-   - Some files were incomplete and missing certain visit records. These missing visits were added to the dataset with a value of zero.
+## Install
 
-5. **Truncating Homeless Outcome Records**:  
-   - For individuals with multiple homelessness outcomes, only the first recorded outcome was retained. All subsequent records were truncated.
+```bash
+pip install -e .            # core: numpy + torch
+pip install -e ".[d3rlpy]"  # optional: convert a d3rlpy MDPDataset
+pip install -e ".[dev]"     # pytest
+```
 
-6. **Two-Year Observation Window Aggregation**:  
-   - Data was aggregated into a two-year observation window. If an AMH (Adult Mental Health) diagnosis occurred, it served as the trigger for the aggregation period. This step ensures that states are built based on either an AMH diagnosis or a two-year observation window.
+## Quickstart
 
-7. **Renaming Columns for Ease of Access**:  
-   - Columns were renamed using prefixes for clarity and organization:
-     - `m:` for metadata.
-     - `o:` for observation features.
-     - `a:` for actions.
-     - `r:` for rewards.
-   - This naming convention facilitates easier access to features for building episodes.
+```python
+import hsac
 
-8. **Train-Test-Validation Split**:  
-   - The dataset was split into training, testing, and validation subsets using a 70-20-10 ratio.
+# A learnable offline toy task (train/test share the reward model -> valid generalization test)
+train = hsac.make_synthetic_dataset(n_transitions=10000, n_actions=8, seed=0)
+test  = hsac.make_synthetic_dataset(n_transitions=1500,  n_actions=8, seed=99)
 
-These steps prepare the dataset for further analysis, ensuring data quality, consistency, and ease of use for modeling and research.
+algo = hsac.HSACConfig(n_options=2, encoder="mlp").create()
+algo.fit(train, n_steps=3000)
 
+action, info = algo.predict(test.observations[:5], return_info=True)
+print(action)                    # chosen actions
+print(info["option"])            # manager's high-level options
+print(info["worker_uncertainty"])# epistemic uncertainty per decision
+```
 
-Next step I will work on the actions to make them encoded and work on the reward function to have one columns as the reward before spliting and saving
+Run the bundled example:
+
+```bash
+python examples/quickstart.py
+```
+
+which trains and reports generalization on a held-out test set:
+
+```
+step  3000 | worker td 0.75 cql 2.00 unc 0.02 | manager distill 0.02
+Greedy policy match-with-optimal: 0.868  (random baseline 0.125)
+```
+
+i.e. the learned hierarchical policy recovers the optimal action **~87%** of the
+time on unseen states, versus 12.5% for random — and the full hierarchical predict
+matches or beats the worker alone, confirming the manager routes to the right option.
+
+## Bring your own data
+
+`hsac` trains from any fixed batch of transitions:
+
+```python
+from hsac import OfflineDataset
+data = OfflineDataset(observations, actions, rewards, next_observations, terminals)
+```
+
+or convert an existing d3rlpy dataset with `hsac.from_d3rlpy(mdp_dataset)`. The
+algorithm supports full multi-step sequential data (discounting + bootstrapping);
+the bundled toy task is single-step for a fast, clean learning signal.
+
+## Package layout
+
+```
+hsac/
+├── __init__.py     # public API
+├── networks.py     # AttentionEncoder / MLPEncoder, CategoricalPolicy, EnsembleQ
+├── algo.py         # HSACConfig + HierarchicalDiscreteSAC (manager + worker, CQL, uncertainty)
+├── dataset.py      # OfflineDataset, synthetic generator, d3rlpy adapter
+└── version.py
+examples/quickstart.py
+tests/test_smoke.py
+```
+
+## Notes
+
+- **Encoder choice.** `encoder="mlp"` is the robust default. `encoder="attention"`
+  targets rich feature-interaction inputs and exposes attention maps, but needs more
+  data/tuning than MLP on small tabular tasks.
+- **Conservatism.** `conservative_weight` trades safety (penalizing OOD actions)
+  against fit; `0.5` is a balanced default. Heavier values are more conservative but
+  can hurt generalization on near-on-policy data.
+- This re-implementation preserves the *design* of the original two-layer
+  hierarchical SAC (attention + CQL + ensemble uncertainty); it is built on PyTorch
+  and the maintained d3rlpy, rather than the original vendored copy of d3rlpy internals.

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hsac"
+version = "0.1.0"
+description = "Hierarchical Discrete Soft Actor-Critic for offline reinforcement learning"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Fazi Shahidi" }]
+keywords = ["reinforcement-learning", "offline-rl", "hierarchical-rl", "soft-actor-critic", "cql", "healthcare"]
+dependencies = [
+    "numpy>=1.21",
+    "torch>=1.12",
+]
+
+[project.optional-dependencies]
+d3rlpy = ["d3rlpy>=2.0"]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/Fuzzy-sh/AHS/tree/main/Reinforcement_learning"
+
+[tool.setuptools.packages.find]
+include = ["hsac*"]
